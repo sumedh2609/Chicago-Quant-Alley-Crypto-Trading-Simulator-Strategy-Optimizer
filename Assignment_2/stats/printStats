@@ -1,0 +1,80 @@
+# stats/printStats.py
+"""
+Post‑simulation analytics:
+  ─ Reads a CSV (timestamp, pnl)
+  ─ Calculates mean/median/std, daily returns, Sharpe,
+    max drawdown, VaR & ES (95 %).
+  ─ Saves cumulative PnL and drawdown plots.
+"""
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import sys, os
+
+def load_pnl(csv_path: str):
+    df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return df
+
+def performance_metrics(df: pd.DataFrame):
+    cum_pnl = df["pnl"].cumsum()
+    daily   = df.resample("1D", on="timestamp")["pnl"].sum()
+
+    stats = {}
+    stats["Mean"] = df["pnl"].mean()
+    stats["Median"] = df["pnl"].median()
+    stats["Std"] = df["pnl"].std()
+
+    # Sharpe (assume 0 rf, daily returns)
+    sharpe = daily.mean() / daily.std() * np.sqrt(252) if daily.std() else np.nan
+    stats["Sharpe"] = sharpe
+
+    # Max drawdown
+    running_max = cum_pnl.cummax()
+    drawdown = cum_pnl - running_max
+    stats["MaxDrawdown"] = drawdown.min()
+
+    # VaR & ES at 95 %
+    sorted_ret = daily.sort_values()
+    var_idx = int(0.05 * len(sorted_ret))
+    stats["VaR_95"] = sorted_ret.iloc[var_idx]
+    stats["ES_95"] = sorted_ret.iloc[:var_idx].mean()
+
+    return stats, cum_pnl, drawdown
+
+def save_plots(cum_pnl, drawdown, out_dir="stats"):
+    os.makedirs(out_dir, exist_ok=True)
+    # Cumulative PnL
+    plt.figure()
+    cum_pnl.plot(title="Cumulative PnL")
+    plt.xlabel("Time")
+    plt.ylabel("PnL")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "cumulative_pnl.png"))
+    plt.close()
+
+    # Drawdown
+    plt.figure()
+    drawdown.plot(title="Drawdown")
+    plt.xlabel("Time")
+    plt.ylabel("Drawdown")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "drawdown.png"))
+    plt.close()
+
+def main(csv_path):
+    df = load_pnl(csv_path)
+    stats, cum_pnl, dd = performance_metrics(df)
+    save_plots(cum_pnl, dd)
+
+    print("---- Performance Metrics ----")
+    for k, v in stats.items():
+        print(f"{k:15}: {v:,.2f}")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python printStats.py path/to/pnl.csv")
+        sys.exit(1)
+    main(sys.argv[1])
