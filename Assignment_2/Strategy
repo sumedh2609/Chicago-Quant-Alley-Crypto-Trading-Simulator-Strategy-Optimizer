@@ -31,12 +31,18 @@ class Strategy:
 
     # ----------  EVENT HANDLERS  ---------- #
     def onMarketData(self, row: pd.Series):
+        symbol = row["Symbol"]
+        price = row["price"]
+        size = row["size"]
+        # ts = row["timestamp"]
+
         ts_str   = row[config.timestamp_col]
         sym      = row["Symbol"]
         price    = row[config.price_col]
+        ts = row["timestamp"]
 
         # Determine calendar day of first tick
-        ts = datetime.strptime(ts_str, config.time_fmt)
+        # ts = datetime.strptime(ts_str, config.time_fmt)
         if self.first_trading_day is None:
             self.first_trading_day = ts.date()
 
@@ -50,6 +56,9 @@ class Strategy:
         # EXIT LOGIC (only evaluate after entry)
         if self.entry_ts:
             self._check_exit_conditions(price)
+
+        print(f"Market Data - Symbol: {symbol}, Price: {price}, Size: {size}, Time: {ts}")
+
 
     def onTradeConfirmation(self, symbol, side, qty, px):
         """
