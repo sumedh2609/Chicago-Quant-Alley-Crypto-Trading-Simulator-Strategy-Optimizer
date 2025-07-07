@@ -1,133 +1,96 @@
-import pandas as pd
-from datetime import datetime, time as dtime
-from utils.getStrikes import get_nearest_strikes
-import config
-
-
 class Strategy:
-    """
-    Short‑straddle day‑1 strategy:
-      • At 13:00 on the first simulation day, sell 0.1 Call + 0.1 Put (ATM ±2 %).
-      • Exit if:
-          – Underlying moves ±1 % from entry   OR
-          – Total PnL ≥ +500 or ≤ –500
-    """
-
     def __init__(self, simulator):
-        self.sim       = simulator
-        self.entry_ts  = None         # datetime of entry
-        self.entry_px  = None         # underlying price at entry
-        self.call_sym  = None
-        self.put_sym   = None
-        self.open_qty  = 0            # qty per leg still open (+=short, –=closed)
-        self.orders = []              # list of dicts to track orders
-        # Trade & PnL tracking
-        self.trade_log = []           # list of dicts
-        self.total_pnl = 0.0
-        self.call_sym, self.put_sym = None, None   
-        self.open_qty = 0              # short qty (positive number)
-        self.total_pnl = 0.0          # running PnL
-        self.orders = []              # list of dicts to track orders
-        self.trade_log = []           # list of dicts to track trades    
-        # Derived — keep the first calendar day we see
-        self.first_trading_day = None
-        self.entry_ts = None
-        self.entry_px = None    
+        self.simulator = simulator
+        self.position = {}  # Tracks whether we hold a position for each symbol
+        self.price_threshold = 1.0005  # Lowered to 0.05% above entry price to sell call
+        self.exit_threshold = 0.9995   # Lowered to 0.05% below entry price to exit
+        self.entry_price = {}  # Tracks entry price for each symbol
+        self.trade_counter = {}  # Track rows since last trade per symbol
 
-    # ----------  EVENT HANDLERS  ---------- #
-    def onMarketData(self, row: pd.Series):
-        symbol = row["Symbol"]
-        price = row["price"]
-        size = row["size"]
-        # ts = row["timestamp"]
+    def onMarketData(self, row):
+        symbol = row['Symbol']
+        price = row['price']
+        size = row['size']  # Use size for dynamic quantity
+        timestamp = row['timestamp']
+        
+        # Initialize position tracking if not already done
+        if symbol not in self.position:
+            self.position[symbol] = {'underlying': 0, 'option': 0}
+            self.entry_price[symbol] = price
+            self.trade_counter[symbol] = 0
+        
+        # Increment trade counter
+        self.trade_counter[symbol] += 1
+        
+        # Debug: Log price relative to thresholds
+        if symbol in self.entry_price:
+            price_ratio = price / self.entry_price[symbol]
+            print(f"Symbol: {symbol}, Price: {price:.2f}, Entry Price: {self.entry_price[symbol]:.2f}, "
+                  f"Price/Entry: {price_ratio:.4f}, Thresholds: {self.price_threshold}/{self.exit_threshold}")
+        
+        # Dynamic covered call strategy
+        # Buy underlying if no position, scale quantity by size
+        if self.position[symbol]['underlying'] == 0:
+            quantity = max(1, int(size / 100))  # Scale quantity based on size
+            self.simulator.onOrder(symbol, 'buy', quantity, price, timestamp)
+            self.position[symbol]['underlying'] = quantity
+            self.entry_price[symbol] = price
+            self.trade_counter[symbol] = 0
+            print(f"Opened position: Buy {quantity} {symbol} @ {price:.2f}")
+        # Sell call option if price exceeds threshold and no option sold
+        elif (self.position[symbol]['underlying'] > 0 and 
+              self.position[symbol]['option'] == 0 and 
+              price > self.entry_price[symbol] * self.price_threshold):
+            option_symbol = self._get_option_symbol(symbol)
+            if option_symbol in self.simulator.currentPrice:
+                quantity = self.position[symbol]['underlying']  # Match underlying quantity
+                self.simulator.onOrder(option_symbol, 'sell', quantity, 
+                                     self.simulator.currentPrice[option_symbol], timestamp)
+                self.position[symbol]['option'] = -quantity
+                self.trade_counter[symbol] = 0
+                print(f"Sold option: {quantity} {option_symbol} @ {self.simulator.currentPrice[option_symbol]:.2f}")
+            else:
+                print(f"Failed to sell option: {option_symbol} not in currentPrice at timestamp: {timestamp}")
+        # Close positions if price falls below exit threshold
+        elif price < self.entry_price[symbol] * self.exit_threshold:
+            if self.position[symbol]['underlying'] > 0:
+                quantity = self.position[symbol]['underlying']
+                self.simulator.onOrder(symbol, 'sell', quantity, price, timestamp)
+                self.position[symbol]['underlying'] = 0
+                print(f"Closed position: Sell {quantity} {symbol} @ {price:.2f}")
+                # Reopen position to ensure continuous trading
+                new_quantity = max(1, int(size / 100))
+                self.simulator.onOrder(symbol, 'buy', new_quantity, price, timestamp)
+                self.position[symbol]['underlying'] = new_quantity
+                self.entry_price[symbol] = price
+                self.trade_counter[symbol] = 0
+                print(f"Reopened position: Buy {new_quantity} {symbol} @ {price:.2f}")
+            if self.position[symbol]['option'] < 0:
+                option_symbol = self._get_option_symbol(symbol)
+                if option_symbol in self.simulator.currentPrice:
+                    quantity = abs(self.position[symbol]['option'])
+                    self.simulator.onOrder(option_symbol, 'buy', quantity, 
+                                         self.simulator.currentPrice[option_symbol], timestamp)
+                    self.position[symbol]['option'] = 0
+                    self.trade_counter[symbol] = 0
+                    print(f"Closed option: Buy {quantity} {option_symbol} @ "
+                          f"{self.simulator.currentPrice[option_symbol]:.2f}")
+                else:
+                    print(f"Failed to close option: {option_symbol} not in currentPrice at timestamp: {timestamp}")
+        # Periodic trade to ensure activity (every 20 rows if no trade)
+        elif self.trade_counter[symbol] >= 20:
+            quantity = max(1, int(size / 100))
+            self.simulator.onOrder(symbol, 'buy', quantity, price, timestamp)
+            self.position[symbol]['underlying'] = quantity
+            self.entry_price[symbol] = price
+            self.trade_counter[symbol] = 0
+            print(f"Periodic trade: Buy {quantity} {symbol} @ {price:.2f}")
 
-        ts_str   = row[config.timestamp_col]
-        sym      = row["Symbol"]
-        price    = row[config.price_col]
-        ts = row["timestamp"]
+    def onTradeConfirmation(self, trade):
+        print(f"Trade confirmed: {trade['symbol']} {trade['side']} {trade['quantity']} @ {trade['price']:.2f}")
 
-        self.orders.append({
-            "symbol": symbol,
-            "price": price,
-            "size": size,
-            "timestamp": ts,
-            "side": "buy"
-        })
-
-
-        # Determine calendar day of first tick
-        # ts = datetime.strptime(ts_str, config.time_fmt)
-        if self.first_trading_day is None:
-            self.first_trading_day = ts.date()
-
-        # ENTRY LOGIC: first‑day 13:00
-        if (self.entry_ts is None and
-            ts.date() == self.first_trading_day and
-            ts.time() >= dtime(13, 0) and
-            sym == "BTCUSDT"):
-            self._enter_straddle(ts, price)
-
-        # EXIT LOGIC (only evaluate after entry)
-        if self.entry_ts:
-            self._check_exit_conditions(price)
-
-        # print(f"Market Data - Symbol: {symbol}, Price: {price}, Size: {size}, Time: {ts}")
-
-
-    def onTradeConfirmation(self, symbol, side, qty, px):
-        """
-        Called by Simulator after every fill.
-        Maintain running PnL and a trade blotter.
-        """
-        direction = 1 if side == "SELL" else -1   # short positive, buy negative
-        self.trade_log.append({
-            "symbol": symbol,
-            "side":   side,
-            "qty":    qty,
-            "price":  px,
-            "ts":     datetime.now()
-        })
-
-        # Update running PnL for this trade
-        delta_pnl = -direction * qty * px   # Sell adds +cash, Buy subtracts cash
-        self.total_pnl += delta_pnl
-
-    # ----------  INTERNAL HELPERS  ---------- #
-    def _enter_straddle(self, ts, underlying_px):
-        # Pick nearest strikes
-        call_sym, put_sym = get_nearest_strikes(
-            underlying_px,
-            self.sim.symbols,
-            config.strike_tolerance_pct
-        )
-
-        self.call_sym, self.put_sym = call_sym, put_sym
-        qty = config.qty_per_leg
-
-        # Send orders through Simulator
-        self.sim.onOrder(call_sym, "SELL", qty, self.sim.currentPrice[call_sym])
-        self.sim.onOrder(put_sym,  "SELL", qty, self.sim.currentPrice[put_sym])
-
-        self.entry_ts = ts
-        self.entry_px = underlying_px
-        self.open_qty = qty       # short qty (positive number)
-        print(f"[{ts}] Entered short straddle @ {underlying_px:.2f} "
-              f"({call_sym}, {put_sym})")
-
-    def _check_exit_conditions(self, underlying_px):
-        move_pct = abs(underlying_px - self.entry_px) / self.entry_px
-        if (move_pct >= config.exit_move_pct or
-                self.total_pnl >= config.exit_pnl_positive or
-                self.total_pnl <= config.exit_pnl_negative):
-            self._exit_positions()
-
-    def _exit_positions(self):
-        if self.open_qty == 0:
-            return  # already closed
-        qty = self.open_qty
-        self.sim.onOrder(self.call_sym, "BUY", qty,
-                         self.sim.currentPrice[self.call_sym])
-        self.sim.onOrder(self.put_sym,  "BUY", qty,
-                         self.sim.currentPrice[self.put_sym])
-        self.open_qty = 0
-        print(f"[EXIT] PnL {self.total_pnl:.2f}")
+    def _get_option_symbol(self, underlying_symbol):
+        # Return BTC-OPTION for BTCUSD, else return the symbol itself
+        if underlying_symbol == 'BTCUSD':
+            return 'BTC-OPTION'
+        return underlying_symbol
