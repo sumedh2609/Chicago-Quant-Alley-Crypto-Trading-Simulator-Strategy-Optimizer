@@ -1,44 +1,172 @@
-getstrikes: 
-# utils/getStrikes.py
-"""
-Utility to pick the nearest call & put strikes around an
-at‑the‑money price, given the symbols available for the day.
-"""
+# Simulator.py
 
-def extract_strike(symbol: str) -> float:
-    """
-    Parse strike from a symbol string like 'C-BTC-70000-20240601'.
-    """
-    try:
-        return float(symbol.split("-")[3])
-    except (IndexError, ValueError):
-        raise ValueError(f"Cannot parse strike from {symbol}")
+# TODO: Import required libraries (pandas, os, datetime, etc.)
+import pandas as pd
+import os
+from datetime import datetime, timedelta
 
-def get_nearest_strikes(underlying_price: float,
-                        symbol_list: list,
-                        tolerance: float = 0.02):
-    """
-    Return (call_symbol, put_symbol) whose strikes are within
-    ±tolerance of underlying_price and closest to ATM.
-    """
-    calls, puts = [], []
-    for sym in symbol_list:
-        if sym.startswith("C-"):
-            calls.append(sym)
-        elif sym.startswith("P-"):
-            puts.append(sym)
+# TODO: Import your Strategy class and config module
+from Strategy import Strategy
+import config
 
-    # Compute distance to ATM for each
-    def nearest(side_list):
-        side_list = sorted(side_list,
-                           key=lambda s: abs(extract_strike(s)-underlying_price))
-        for s in side_list:
-            if abs(extract_strike(s)-underlying_price) <= tolerance*underlying_price:
-                return s
-        return None
 
-    call_sym = nearest(calls)
-    put_sym  = nearest(puts)
-    if call_sym is None or put_sym is None:
-        raise RuntimeError("No strikes within tolerance.")
-    return call_sym, put_sym
+class Simulator:
+    def __init__(self, configFilePath=None):
+        # TODO: Initialize:
+        self.startDate = config.simStartDate
+        self.endDate = config.simEndDate
+        self.symbols = config.symbols
+        self.df = pd.DataFrame()
+
+        # Tracking dictionaries
+        self.currentPrice = {symbol: 0.0 for symbol in self.symbols}
+        self.currQuantity = {symbol: 0.0 for symbol in self.symbols}
+        self.buyValue = {symbol: 0.0 for symbol in self.symbols}
+        self.sellValue = {symbol: 0.0 for symbol in self.symbols}
+
+        # Slippage constant
+        self.slippage = 0.0001
+
+        # Instantiate strategy object
+        self.strategy = Strategy(self)
+
+        # Load data and start simulation
+        self.readData()
+        self.startSimulation()
+
+    # def readData(self):
+    #     dataframes = []
+    #     date = datetime.strptime(self.startDate, "%Y%m%d")
+    #     end_date = datetime.strptime(self.endDate, "%Y%m%d")
+
+    #     while date <= end_date:
+    #         folder = f"data/{date.strftime('%Y%m%d')}/"
+    #         for symbol in self.symbols:
+    #             filename = os.path.join(folder, f"MARK:{symbol}.csv")
+    #             if os.path.exists(filename):
+    #                 df = pd.read_csv(filename)
+    #                 df["Symbol"] = symbol
+    #                 dataframes.append(df)
+    #         date += timedelta(days=1)
+
+    #     if dataframes:
+    #         self.df = pd.concat(dataframes)
+    #         # self.df = self.df.sort_values("timestamp").reset_index(drop=True)
+    #         self.df = self.df.sort_values(config.timestamp_col).reset_index(drop=True)
+    #         print(f"Data loaded for {len(dataframes)} files.")
+    #         print(f"Total records: {len(self.df)}") 
+    #     else:
+    #         print("No data found.")
+
+    def readData(self):
+        files = [
+            "futures_BTCUSD_2024_06_trades.csv",
+            "options_BTC_2024_06_trades.csv"
+        ]
+        dfs = []
+
+        for file in files:
+            if not os.path.exists(file):
+                print(f"File not found: {file}")
+                continue
+            df = pd.read_csv(file)
+            df = df.rename(columns={
+                "product_symbol": "Symbol",
+                "price": "price",
+                "size": "size",
+                "timestamp": "timestamp"
+            })
+            dfs.append(df)
+
+        if dfs:
+            self.df = pd.concat(dfs)
+            # self.df["timestamp"] = pd.to_datetime(self.df["timestamp"])
+            self.df["timestamp"] = pd.to_datetime(self.df["timestamp"], format='mixed', errors='coerce')
+            self.df = self.df.sort_values("timestamp").reset_index(drop=True)
+        else:
+            print("No data loaded.")
+        
+        print("Loaded DataFrame:")
+        print(self.df.head())
+        print(f"Total rows: {len(self.df)}")
+
+
+
+    def startSimulation(self):
+        for idx, row in self.df.iterrows():
+            symbol = row["Symbol"]
+            price = row["price"]
+
+            self.currentPrice[symbol] = price
+            self.strategy.onMarketData(row)
+
+            # Optional: Print current PnL at each step
+            # self.printPnl()
+
+    def onOrder(self, symbol, side, quantity, price):
+        slippage_price = price * (1 + self.slippage) if side == "BUY" else price * (1 - self.slippage)
+        trade_value = slippage_price * quantity
+
+        if side == "BUY":
+            self.currQuantity[symbol] += quantity
+            self.buyValue[symbol] += trade_value
+        elif side == "SELL":
+            self.currQuantity[symbol] -= quantity
+            self.sellValue[symbol] += trade_value
+
+        self.strategy.onTradeConfirmation(symbol, side, quantity, slippage_price)
+        print(f"Order Placed: {side} {quantity} {symbol} @ {price}")
+
+
+    # def printPnl(self):
+    #     total_pnl = 0.0
+    #     for symbol in self.symbols:
+    #         realized_pnl = self.sellValue[symbol] - self.buyValue[symbol]
+    #         unrealized_pnl = self.currQuantity[symbol] * self.currentPrice[symbol]
+    #         symbol_pnl = realized_pnl + unrealized_pnl
+    #         total_pnl += symbol_pnl
+
+    #     print(f"--- Final Position Report ---\nTotal PnL: {total_pnl:.2f}")
+    #     print("--- Final Position Report ---")
+    #     print(f"Total PnL: {total_pnl:.2f}")
+
+    def printPnl(self):
+        print("\n--- Final Position Report ---")
+        total_realized_pnl = 0
+        total_unrealized_pnl = 0
+
+        for symbol in self.currQuantity:
+            qty = self.currQuantity[symbol]
+            buy_val = self.buyValue[symbol]
+            sell_val = self.sellValue[symbol]
+            current_price = self.currentPrice.get(symbol, 0)
+
+            realized = sell_val - buy_val
+            unrealized = qty * current_price
+
+            symbol_pnl = realized + unrealized
+
+            total_realized_pnl += realized
+            total_unrealized_pnl += unrealized
+
+            print(f"{symbol} → Qty: {qty}, Buy: {buy_val:.2f}, Sell: {sell_val:.2f}, Current: {current_price:.2f}, PnL: {symbol_pnl:.2f}")
+
+        total_pnl = total_realized_pnl + total_unrealized_pnl
+        # print(f"\nTotal Realized PnL: {total_realized_pnl:.2f}")
+        # print(f"Total Unrealized PnL: {total_unrealized_pnl:.2f}")
+        # print(f"Total PnL: {total_pnl:.2f}")
+        print("--- Final Position Report ---")
+        print("Total PnL:", total_pnl)
+        
+
+
+
+
+# TODO (Optional): Add if __name__ == "__main__" block
+# - Instantiate Simulator and run it
+if __name__ == "__main__":
+    sim = Simulator()
+    from stats.printStats import printStats
+    printStats(sim.strategy.orders)
+
+print("Calling printStats with orders:", len(sim.strategy.orders))
