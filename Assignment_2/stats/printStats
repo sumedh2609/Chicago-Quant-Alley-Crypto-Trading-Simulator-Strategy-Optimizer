@@ -16,6 +16,17 @@ def load_pnl(csv_path: str):
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df
 
+def printStats(orders):
+    total_pnl = 0
+    # Your PnL logic here, for example:
+    for order in orders:
+        if order["side"] == "buy":
+            total_pnl -= order["price"] * order["size"]
+        elif order["side"] == "sell":
+            total_pnl += order["price"] * order["size"]
+    print("--- Final Position Report ---")
+    print("Total PnL:", round(total_pnl, 2))
+
 def performance_metrics(df: pd.DataFrame):
     cum_pnl = df["pnl"].cumsum()
     daily   = df.resample("1D", on="timestamp")["pnl"].sum()
@@ -78,3 +89,4 @@ if __name__ == "__main__":
         print("Usage: python printStats.py path/to/pnl.csv")
         sys.exit(1)
     main(sys.argv[1])
+
