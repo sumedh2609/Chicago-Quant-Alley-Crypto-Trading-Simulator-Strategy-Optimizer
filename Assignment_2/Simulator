@@ -80,10 +80,16 @@ class Simulator:
 
         if dfs:
             self.df = pd.concat(dfs)
-            self.df["timestamp"] = pd.to_datetime(self.df["timestamp"])
+            # self.df["timestamp"] = pd.to_datetime(self.df["timestamp"])
+            self.df["timestamp"] = pd.to_datetime(self.df["timestamp"], format='mixed', errors='coerce')
             self.df = self.df.sort_values("timestamp").reset_index(drop=True)
         else:
             print("No data loaded.")
+        
+        print("Loaded DataFrame:")
+        print(self.df.head())
+        print(f"Total rows: {len(self.df)}")
+
 
 
     def startSimulation(self):
@@ -109,6 +115,8 @@ class Simulator:
             self.sellValue[symbol] += trade_value
 
         self.strategy.onTradeConfirmation(symbol, side, quantity, slippage_price)
+        print(f"Order Placed: {side} {quantity} {symbol} @ {price}")
+
 
     def printPnl(self):
         total_pnl = 0.0
@@ -119,6 +127,9 @@ class Simulator:
             total_pnl += symbol_pnl
 
         print(f"--- Final Position Report ---\nTotal PnL: {total_pnl:.2f}")
+        print("--- Final Position Report ---")
+        print(f"Total PnL: {total_pnl:.2f}")
+
 
 
 # TODO (Optional): Add if __name__ == "__main__" block
