@@ -1,9 +1,12 @@
-# Strategy.py
+# Strategy.py 
 import pandas as pd
 from datetime import datetime, time as dtime
 from utils.getStrikes import get_nearest_strikes
 import config
 # config.py
+
+
+time_fmt = "%d-%m-%Y %H:%M:%S"
 
 simStartDate = "20240601"
 simEndDate = "20240605"
